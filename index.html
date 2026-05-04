@@ -1,0 +1,679 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  onSnapshot, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc, 
+  query,
+  setDoc,
+  getDoc
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  Users, 
+  Package, 
+  Plus, 
+  Trash2, 
+  MessageCircle, 
+  Wallet,
+  X,
+  Camera,
+  Loader2,
+  History,
+  FolderOpen,
+  Share2,
+  UserPlus,
+  Send,
+  Menu,
+  ChevronRight,
+  Users2,
+  CheckCircle2,
+  ExternalLink
+} from 'lucide-react';
+
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'rekreasi-v4-final';
+const apiKey = ""; 
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [events, setEvents] = useState([]);
+  const [currentEventId, setCurrentEventId] = useState(null);
+  const [members, setMembers] = useState([]);
+  const [items, setItems] = useState([]);
+  const [costs, setCosts] = useState([]);
+  
+  // UI States
+  const [activeTab, setActiveTab] = useState('items');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
+  const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [selectedItemForMove, setSelectedItemForMove] = useState(null);
+
+  // Form States
+  const [newEventName, setNewEventName] = useState('');
+  const [newItemName, setNewItemName] = useState('');
+  const [newMemberName, setNewMemberName] = useState('');
+  const [newMemberWA, setNewMemberWA] = useState('');
+  const [newSharedName, setNewSharedName] = useState('');
+  const [newSharedAmount, setNewSharedAmount] = useState('');
+  const [personalTarget, setPersonalTarget] = useState(null);
+  const [personalDesc, setPersonalDesc] = useState('');
+  const [personalAmount, setPersonalAmount] = useState('');
+  const [isScanning, setIsScanning] = useState(false);
+  const [scannedItems, setScannedItems] = useState([]);
+  const [selectedScannedIndex, setSelectedScannedIndex] = useState(null);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const eventIdParam = params.get('eventId');
+    if (eventIdParam) setCurrentEventId(eventIdParam);
+
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        await signInWithCustomToken(auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(auth);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    return onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'events'), (s) => {
+      const list = s.docs.map(d => ({ id: d.id, ...d.data() }));
+      setEvents(list);
+      if (!currentEventId && list.length > 0) {
+        setCurrentEventId(list.sort((a,b) => b.createdAt - a.createdAt)[0].id);
+      }
+    });
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || !currentEventId) return;
+    const path = `events/${currentEventId}`;
+    const unsubM = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', `${path}/members`), s => setMembers(s.docs.map(d => ({id: d.id, ...d.data()}))), (err) => console.error(err));
+    const unsubI = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', `${path}/items`), s => setItems(s.docs.map(d => ({id: d.id, ...d.data()}))), (err) => console.error(err));
+    const unsubC = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', `${path}/costs`), s => setCosts(s.docs.map(d => ({id: d.id, ...d.data()}))), (err) => console.error(err));
+    return () => { unsubM(); unsubI(); unsubC(); };
+  }, [user, currentEventId]);
+
+  const currentEvent = useMemo(() => events.find(e => e.id === currentEventId), [events, currentEventId]);
+
+  const sharedExpenses = useMemo(() => costs.filter(c => c.targetId === 'all').reduce((s, c) => s + c.amount, 0), [costs]);
+  const sharedCostsList = useMemo(() => costs.filter(c => c.targetId === 'all'), [costs]);
+  const payingMembersCount = useMemo(() => members.filter(m => !m.isFree).length, [members]);
+  const targetPerPerson = useMemo(() => payingMembersCount > 0 ? sharedExpenses / payingMembersCount : 0, [sharedExpenses, payingMembersCount]);
+
+  const getMemberFinancials = (member) => {
+    const personal = costs.filter(c => c.targetId === member.id);
+    const personalTotal = personal.reduce((s, c) => s + c.amount, 0);
+    const sharedRequired = member.isFree ? 0 : targetPerPerson;
+    const totalObligation = sharedRequired + personalTotal;
+    const totalPaid = Number(member.deposit) || 0;
+    return { personal, personalTotal, sharedRequired, totalObligation, totalPaid, balance: totalPaid - totalObligation };
+  };
+
+  const createEvent = async () => {
+    if (!newEventName) return;
+    const d = await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'events'), { name: newEventName, createdAt: Date.now(), driveLink: '' });
+    setCurrentEventId(d.id); setNewEventName(''); setIsEventModalOpen(false); setIsSidebarOpen(false);
+  };
+
+  const addManualCost = async () => {
+    if (!newSharedName || !newSharedAmount || !currentEventId) return;
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/costs`), {
+      description: newSharedName, amount: parseFloat(newSharedAmount), targetId: 'all', createdAt: Date.now()
+    });
+    setNewSharedName(''); setNewSharedAmount('');
+  };
+
+  const addPersonalCost = async () => {
+    if (!personalDesc || !personalAmount || !personalTarget) return;
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/costs`), {
+      description: personalDesc, amount: parseFloat(personalAmount), targetId: personalTarget.id, createdAt: Date.now()
+    });
+    setPersonalDesc(''); setPersonalAmount(''); setPersonalTarget(null);
+  };
+
+  const allocateScannedItem = async (targetId) => {
+    if (selectedScannedIndex === null) return;
+    const item = scannedItems[selectedScannedIndex];
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/costs`), {
+      description: item.name, amount: item.price, targetId: targetId, createdAt: Date.now()
+    });
+    setScannedItems(scannedItems.filter((_, i) => i !== selectedScannedIndex));
+    setSelectedScannedIndex(null);
+  };
+
+  const deleteCost = async (id) => {
+    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/costs`, id));
+  };
+
+  const updateDeposit = async (memberId, val) => {
+    const amount = parseFloat(val) || 0;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/members`, memberId), { deposit: amount });
+  };
+
+  const copyLink = () => {
+    const url = `${window.location.origin}${window.location.pathname}?eventId=${currentEventId}`;
+    const el = document.createElement('textarea'); el.value = url; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el);
+    alert("Link event disalin ke clipboard!");
+  };
+
+  const sendWA = (member) => {
+    const fin = getMemberFinancials(member);
+    let msg = `*LAPORAN BIAYA: ${currentEvent?.name}*\n\n` +
+              `Total Tagihan: Rp ${Math.round(fin.totalObligation).toLocaleString()}\n` +
+              `Sudah Dibayar/DP: Rp ${fin.totalPaid.toLocaleString()}\n` +
+              `Sisa: *${fin.balance >= 0 ? 'LUNAS ✅' : 'KURANG Rp ' + Math.abs(Math.round(fin.balance)).toLocaleString()}*\n\n` +
+              `Link Foto: ${currentEvent?.driveLink || '-'}`;
+    window.open(`https://wa.me/${member.whatsapp}?text=${encodeURIComponent(msg)}`);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex text-slate-900 font-sans relative overflow-hidden">
+      
+      {/* Sidebar Overlay */}
+      <div className={`fixed inset-0 z-50 bg-black/50 backdrop-blur-sm transition-opacity duration-300 ${isSidebarOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setIsSidebarOpen(false)}></div>
+
+      {/* Sidebar */}
+      <aside className={`fixed inset-y-0 left-0 z-[60] w-72 bg-indigo-950 text-white transform transition-transform duration-300 ease-in-out ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="p-6 flex flex-col h-full">
+          <div className="flex justify-between items-center mb-8 border-b border-white/10 pb-4">
+            <h2 className="font-black italic flex items-center gap-2"><History size={20}/> RIWAYAT EVENT</h2>
+            <button onClick={() => setIsSidebarOpen(false)} className="p-2 hover:bg-white/10 rounded-lg"><X/></button>
+          </div>
+          <button onClick={() => setIsEventModalOpen(true)} className="w-full mb-6 py-4 bg-indigo-500 rounded-2xl font-black text-xs uppercase flex items-center justify-center gap-2 shadow-lg hover:bg-indigo-400 transition-all">
+            <Plus size={16}/> Buat Baru
+          </button>
+          <div className="flex-1 overflow-y-auto space-y-2 pr-2">
+            {events.sort((a,b) => b.createdAt - a.createdAt).map(ev => (
+              <button 
+                key={ev.id} 
+                onClick={() => { setCurrentEventId(ev.id); setIsSidebarOpen(false); }}
+                className={`w-full p-4 rounded-2xl text-left transition-all ${currentEventId === ev.id ? 'bg-white text-indigo-950 shadow-xl' : 'text-indigo-300 hover:bg-indigo-900'}`}
+              >
+                <p className="font-black text-sm truncate">{ev.name}</p>
+                <p className="text-[10px] opacity-60 font-bold">{new Date(ev.createdAt).toLocaleDateString()}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col h-screen overflow-hidden">
+        
+        {/* Header */}
+        <header className="bg-white border-b border-slate-200 p-4 md:p-6 sticky top-0 z-40">
+          <div className="max-w-6xl mx-auto flex justify-between items-center">
+            <div className="flex items-center gap-4">
+              <button onClick={() => setIsSidebarOpen(true)} className="p-3 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100 transition-colors">
+                <Menu size={22}/>
+              </button>
+              <div>
+                <h1 className="text-xl md:text-2xl font-black text-indigo-900 uppercase italic leading-none truncate max-w-[150px] md:max-w-none">
+                  {currentEvent?.name || 'Rekreasi App'}
+                </h1>
+                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1">Sistem Kolaborasi Biaya</p>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={copyLink} className="p-3 bg-indigo-100 text-indigo-600 rounded-xl hover:bg-indigo-200 transition-all">
+                <Share2 size={18}/>
+              </button>
+              <button onClick={() => setIsJoinModalOpen(true)} className="px-4 py-3 bg-indigo-900 text-white rounded-xl font-black text-xs uppercase flex items-center gap-2 hover:bg-indigo-800 transition-all shadow-lg shadow-indigo-100">
+                <UserPlus size={16}/> <span className="hidden sm:inline">Join</span>
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <main className="flex-1 overflow-y-auto p-4 md:p-8">
+          <div className="max-w-5xl mx-auto space-y-6 pb-20">
+            
+            {/* Drive Link */}
+            <div className="bg-white p-4 md:p-6 rounded-[2.5rem] border border-slate-200 shadow-sm flex flex-col md:flex-row items-center gap-4">
+              <div className="p-4 bg-indigo-50 text-indigo-600 rounded-2xl"><FolderOpen size={24}/></div>
+              <div className="flex-1 text-center md:text-left w-full">
+                <h3 className="text-[10px] font-black text-indigo-900 uppercase tracking-widest mb-1">Link Google Drive (Foto)</h3>
+                <input 
+                  value={currentEvent?.driveLink || ''} 
+                  onChange={(e) => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'events', currentEventId), { driveLink: e.target.value })}
+                  placeholder="Paste link di sini untuk akses foto bersama..."
+                  className="w-full text-xs font-bold text-indigo-400 bg-transparent border-none focus:ring-0 p-0"
+                />
+              </div>
+              {currentEvent?.driveLink && (
+                <a href={currentEvent.driveLink} target="_blank" className="p-4 bg-indigo-600 text-white rounded-2xl hover:bg-indigo-700 transition shadow-lg shadow-indigo-100"><ExternalLink size={20}/></a>
+              )}
+            </div>
+
+            {/* Tabs */}
+            <div className="grid grid-cols-3 gap-1.5 bg-white p-1.5 rounded-2xl border border-slate-200 shadow-sm sticky top-0 z-30">
+              {[
+                { id: 'items', label: 'Barang', icon: Package },
+                { id: 'budget', label: 'Biaya', icon: Wallet },
+                { id: 'members', label: 'Grup', icon: Users }
+              ].map(t => (
+                <button 
+                  key={t.id} 
+                  onClick={() => setActiveTab(t.id)}
+                  className={`flex flex-col md:flex-row items-center justify-center gap-2 py-3.5 rounded-xl transition-all ${activeTab === t.id ? 'bg-indigo-600 text-white shadow-xl shadow-indigo-100' : 'text-slate-400 hover:bg-slate-50'}`}
+                >
+                  <t.icon size={18}/>
+                  <span className="text-[10px] font-black uppercase tracking-tighter">{t.label}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* TAB: BUDGET (Biaya) */}
+            {activeTab === 'budget' && (
+              <div className="space-y-6 animate-in fade-in duration-500">
+                {/* Summary Card */}
+                <div className="bg-indigo-900 p-8 rounded-[3rem] text-white shadow-2xl relative overflow-hidden">
+                  <div className="relative z-10 grid md:grid-cols-2 gap-8 items-center">
+                    <div>
+                      <h4 className="text-[10px] font-black text-indigo-300 uppercase tracking-[0.2em] mb-2">Total Biaya Bersama</h4>
+                      <p className="text-5xl font-black italic">Rp {sharedExpenses.toLocaleString()}</p>
+                      <div className="flex items-center gap-3 bg-white/10 w-fit px-4 py-2 rounded-full border border-white/10 mt-4">
+                        <Users2 size={16} className="text-indigo-300"/>
+                        <p className="text-[10px] font-black uppercase">Rp {Math.round(targetPerPerson).toLocaleString()} / Orang</p>
+                      </div>
+                    </div>
+                    
+                    {/* Manual Input Form */}
+                    <div className="bg-white/5 p-6 rounded-[2rem] border border-white/10 backdrop-blur-sm space-y-4">
+                      <h5 className="text-[10px] font-black uppercase text-indigo-200">Tambah Biaya Bersama</h5>
+                      <input value={newSharedName} onChange={e => setNewSharedName(e.target.value)} placeholder="Nama Pengeluaran" className="w-full bg-white/10 border border-white/10 p-4 rounded-xl text-xs font-bold text-white placeholder:text-white/20 outline-none" />
+                      <div className="flex gap-2">
+                        <input type="number" value={newSharedAmount} onChange={e => setNewSharedAmount(e.target.value)} placeholder="Nominal" className="flex-1 bg-white/10 border border-white/10 p-4 rounded-xl text-xs font-bold text-white outline-none" />
+                        <button onClick={addManualCost} className="p-4 bg-white text-indigo-900 rounded-xl hover:bg-indigo-50 transition-all"><Send size={18}/></button>
+                      </div>
+                      <button onClick={() => setIsScannerOpen(true)} className="w-full py-4 bg-indigo-500 text-white rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-3 hover:bg-indigo-400 transition-all">
+                        <Camera size={18}/> Scan Nota
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Shared Costs Table (Bisa Dihapus) */}
+                <div className="bg-white p-6 rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
+                  <h4 className="text-[10px] font-black text-slate-400 uppercase mb-4 tracking-widest px-2">Daftar Nota Bersama</h4>
+                  <div className="space-y-2">
+                    {sharedCostsList.map(cost => (
+                      <div key={cost.id} className="p-4 bg-slate-50 rounded-2xl flex justify-between items-center group">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 bg-white border rounded-lg flex items-center justify-center text-indigo-600 font-bold text-xs"><Package size={14}/></div>
+                          <span className="text-xs font-bold text-slate-700 uppercase">{cost.description}</span>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <span className="text-xs font-black text-indigo-600">Rp {cost.amount.toLocaleString()}</span>
+                          <button onClick={() => deleteCost(cost.id)} className="p-2 text-rose-300 hover:text-rose-600 transition-colors"><Trash2 size={16}/></button>
+                        </div>
+                      </div>
+                    ))}
+                    {sharedCostsList.length === 0 && <p className="text-center text-[10px] font-bold text-slate-300 py-4 italic">Belum ada rincian nota bersama</p>}
+                  </div>
+                </div>
+
+                {/* Member Cards with DEPOSIT */}
+                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {members.map(m => {
+                    const fin = getMemberFinancials(m);
+                    return (
+                      <div key={m.id} className="bg-white p-7 rounded-[2.5rem] border border-slate-200 shadow-sm flex flex-col space-y-5 hover:shadow-lg transition-all border-b-8" style={{ borderBottomColor: fin.balance >= 0 ? '#10b981' : '#f43f5e' }}>
+                        <div className="flex justify-between items-center">
+                          <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 bg-indigo-600 text-white rounded-2xl flex items-center justify-center font-black italic shadow-lg shadow-indigo-50">{m.name.charAt(0)}</div>
+                            <div>
+                              <h4 className="font-black text-sm text-slate-800 leading-none">{m.name}</h4>
+                              <button onClick={() => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/members`, m.id), { isFree: !m.isFree })} className={`text-[9px] font-black uppercase mt-1.5 px-2 py-0.5 rounded-full border ${m.isFree ? 'bg-amber-50 text-amber-600' : 'text-slate-400'}`}>
+                                {m.isFree ? 'Bebas Iuran' : 'Ikut Patungan'}
+                              </button>
+                            </div>
+                          </div>
+                          <button onClick={() => setPersonalTarget(m)} className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl hover:bg-indigo-100"><Plus size={18}/></button>
+                        </div>
+
+                        {/* Rincian Section */}
+                        <div className="bg-slate-50/50 p-4 rounded-3xl space-y-2 min-h-[100px] border border-slate-100">
+                          {!m.isFree && (
+                            <div className="flex justify-between text-[10px] font-bold text-slate-500 bg-white/60 p-2 rounded-xl border border-slate-100">
+                               <span>Patungan Bersama</span>
+                               <span>Rp {Math.round(targetPerPerson).toLocaleString()}</span>
+                            </div>
+                          )}
+                          {fin.personal.map(c => (
+                            <div key={c.id} className="flex justify-between text-[10px] font-bold text-indigo-600 bg-white p-2 rounded-xl border border-indigo-50 shadow-sm">
+                              <span className="truncate max-w-[100px]">{c.description}</span>
+                              <div className="flex items-center gap-2">
+                                <span>Rp {c.amount.toLocaleString()}</span>
+                                <button onClick={() => deleteCost(c.id)} className="text-rose-300 hover:text-rose-500"><X size={12}/></button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Payment & Status */}
+                        <div className="space-y-4 pt-2">
+                          <div className="bg-slate-100/50 p-5 rounded-3xl border border-slate-100">
+                            <div className="flex justify-between items-center mb-3">
+                              <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Uang Sudah Masuk</span>
+                              <span className="text-[10px] font-black text-emerald-600 uppercase">Input Manual</span>
+                            </div>
+                            <div className="flex items-center gap-2 bg-white p-3 rounded-2xl shadow-inner border border-slate-100 focus-within:ring-2 focus-within:ring-indigo-100 transition-all">
+                              <span className="text-xs font-black text-slate-300">Rp</span>
+                              <input 
+                                type="number" 
+                                value={m.deposit || ''} 
+                                onChange={(e) => updateDeposit(m.id, e.target.value)}
+                                placeholder="0"
+                                className="w-full bg-transparent outline-none text-base font-black text-slate-800 p-0"
+                              />
+                            </div>
+                            
+                            <div className="mt-4 pt-4 border-t border-slate-200 flex justify-between items-end">
+                               <div>
+                                  <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Status Saldo</p>
+                                  <p className={`text-sm font-black italic ${fin.balance >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                    {fin.balance >= 0 ? 'LUNAS ✅' : 'Rp -' + Math.abs(Math.round(fin.balance)).toLocaleString()}
+                                  </p>
+                               </div>
+                               <div className="text-right">
+                                  <p className="text-[9px] font-black text-slate-400 uppercase mb-1">Total Tagihan</p>
+                                  <p className="text-xs font-bold text-slate-700">Rp {Math.round(fin.totalObligation).toLocaleString()}</p>
+                               </div>
+                            </div>
+                          </div>
+                          
+                          <button onClick={() => sendWA(m)} className="w-full py-4 bg-emerald-500 text-white rounded-2xl font-black text-[10px] uppercase flex items-center justify-center gap-3 shadow-lg hover:bg-emerald-600 transition-all">
+                             <MessageCircle size={18}/> Kirim Tagihan WA
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* TAB: ITEMS (Logistik) */}
+            {activeTab === 'items' && (
+              <div className="grid lg:grid-cols-3 gap-6 animate-in fade-in duration-500">
+                <div className="lg:col-span-1 space-y-4">
+                  <div className="bg-white p-6 rounded-[2rem] border border-slate-200 shadow-sm">
+                    <h4 className="text-[10px] font-black text-slate-400 uppercase mb-4 tracking-widest">Tambah Logistik</h4>
+                    <div className="flex gap-2">
+                      <input value={newItemName} onChange={e => setNewItemName(e.target.value)} placeholder="Contoh: Tikar" className="flex-1 p-4 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold outline-none" onKeyPress={e => e.key === 'Enter' && addItem()} />
+                      <button onClick={addItem} className="p-4 bg-indigo-600 text-white rounded-xl shadow-lg shadow-indigo-100"><Plus size={20}/></button>
+                    </div>
+                  </div>
+                  <div className="p-5 bg-slate-100/30 rounded-[2.5rem] border-2 border-dashed border-slate-200 min-h-[200px] space-y-2">
+                    <p className="text-[9px] text-center font-black text-indigo-400 uppercase mb-4">Inventaris Belum Dialokasi</p>
+                    {items.filter(i => !i.assignedTo).map(item => (
+                      <div 
+                        key={item.id} 
+                        onClick={() => setSelectedItemForMove(item.id)}
+                        className={`p-4 bg-white rounded-xl shadow-sm border-2 flex justify-between items-center transition-all cursor-pointer ${selectedItemForMove === item.id ? 'border-indigo-600 scale-[1.03]' : 'border-transparent'}`}
+                      >
+                        <span className="font-bold text-xs">{item.name}</span>
+                        <button onClick={(e) => { e.stopPropagation(); deleteEntry('items', item.id); }} className="p-2 text-slate-200 hover:text-rose-500 transition-colors"><Trash2 size={16}/></button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="lg:col-span-2 grid md:grid-cols-2 gap-4">
+                  {members.map(m => (
+                    <div 
+                      key={m.id} 
+                      onClick={() => selectedItemForMove && assignItem(selectedItemForMove, m.id)}
+                      className={`bg-white p-6 rounded-[2.5rem] border-2 transition-all shadow-sm ${selectedItemForMove ? 'border-indigo-400 bg-indigo-50/20 cursor-pointer' : 'border-slate-100'}`}
+                    >
+                      <div className="flex items-center gap-4 mb-5">
+                        <div className="w-10 h-10 bg-indigo-600 text-white rounded-2xl flex items-center justify-center font-black italic shadow-lg shadow-indigo-50">{m.name.charAt(0)}</div>
+                        <h4 className="font-black text-sm text-slate-800">{m.name}</h4>
+                      </div>
+                      <div className="space-y-2 bg-slate-50/50 rounded-2xl p-3 min-h-[80px] border border-dashed border-slate-200">
+                        {items.filter(i => i.assignedTo === m.id).map(item => (
+                          <div key={item.id} className="p-3 bg-white rounded-xl text-[11px] font-bold text-indigo-600 flex justify-between items-center shadow-sm">
+                            <span>{item.name}</span>
+                            <X size={14} className="text-slate-300 hover:text-rose-400" onClick={(e) => { e.stopPropagation(); updateDoc(doc(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/items`, item.id), { assignedTo: null }); }}/>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* TAB: MEMBERS (Anggota) */}
+            {activeTab === 'members' && (
+              <div className="bg-white rounded-[3rem] border border-slate-200 shadow-sm animate-in fade-in duration-500 max-w-2xl mx-auto p-8">
+                <h4 className="font-black text-indigo-900 italic uppercase text-base mb-6 px-2">Anggota Grup ({members.length})</h4>
+                <div className="space-y-3 mb-10">
+                  {members.map(m => (
+                    <div key={m.id} className="p-5 bg-slate-50/50 rounded-3xl flex justify-between items-center border border-transparent hover:bg-white hover:border-slate-100 transition-all">
+                      <div className="flex items-center gap-5">
+                        <div className="w-12 h-12 bg-white border border-slate-100 rounded-2xl flex items-center justify-center font-black italic text-indigo-600 shadow-sm">{m.name.charAt(0)}</div>
+                        <div>
+                           <p className="font-black text-sm text-slate-800">{m.name}</p>
+                           <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">{m.whatsapp}</p>
+                        </div>
+                      </div>
+                      <button onClick={() => deleteEntry('members', m.id)} className="p-3 text-slate-200 hover:text-rose-500 transition-all"><Trash2 size={18}/></button>
+                    </div>
+                  ))}
+                </div>
+                
+                <div className="p-6 bg-slate-100/50 rounded-[2rem] border border-slate-100 space-y-4">
+                  <p className="text-[10px] font-black text-slate-400 uppercase text-center mb-2 tracking-widest">Tambah Anggota Manual</p>
+                  <div className="grid md:grid-cols-2 gap-3">
+                    <input value={newMemberName} onChange={e => setNewMemberName(e.target.value)} placeholder="Nama" className="p-4 bg-white border border-slate-100 rounded-xl text-xs font-bold outline-none" />
+                    <input value={newMemberWA} onChange={e => setNewMemberWA(e.target.value)} placeholder="WhatsApp (628...)" className="p-4 bg-white border border-slate-100 rounded-xl text-xs font-bold outline-none" />
+                  </div>
+                  <button onClick={() => addMember(newMemberName, newMemberWA)} className="w-full p-4 bg-indigo-600 text-white rounded-xl font-black text-xs uppercase tracking-widest hover:bg-indigo-700 transition-all">GABUNG GRUP</button>
+                </div>
+              </div>
+            )}
+
+          </div>
+        </main>
+      </div>
+
+      {/* MODALS SECTION */}
+      
+      {/* Modal: New Event */}
+      {isEventModalOpen && (
+        <div className="fixed inset-0 z-[100] bg-indigo-950/80 backdrop-blur-xl p-4 flex items-center justify-center animate-in fade-in">
+          <div className="bg-white w-full max-w-sm rounded-[3rem] p-8 space-y-6 shadow-2xl">
+            <h3 className="text-xl font-black italic text-indigo-900 text-center uppercase tracking-tight">Rencana Baru</h3>
+            <input value={newEventName} onChange={e => setNewEventName(e.target.value)} placeholder="Contoh: Ke Pantai Anyer" className="w-full p-5 bg-slate-50 rounded-2xl font-bold text-sm text-center outline-none focus:ring-2 focus:ring-indigo-100" />
+            <button onClick={createEvent} className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl hover:bg-indigo-700">MULAI SEKARANG</button>
+            <button onClick={() => setIsEventModalOpen(false)} className="w-full text-[10px] font-black text-slate-400 uppercase tracking-widest">Batal</button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Join Event */}
+      {isJoinModalOpen && (
+        <div className="fixed inset-0 z-[100] bg-indigo-950/80 backdrop-blur-xl p-4 flex items-center justify-center animate-in fade-in">
+          <div className="bg-white w-full max-w-sm rounded-[3rem] p-8 space-y-5 shadow-2xl">
+            <h3 className="text-xl font-black italic text-indigo-900 text-center uppercase">Gabung Event</h3>
+            <input value={newMemberName} onChange={e => setNewMemberName(e.target.value)} placeholder="Nama Panggilan" className="w-full p-5 bg-slate-50 rounded-2xl font-bold text-sm outline-none focus:ring-2 focus:ring-indigo-100" />
+            <input value={newMemberWA} onChange={e => setNewMemberWA(e.target.value)} placeholder="WhatsApp (6281..)" className="w-full p-5 bg-slate-50 rounded-2xl font-bold text-sm outline-none focus:ring-2 focus:ring-indigo-100" />
+            <button onClick={() => { addMember(newMemberName, newMemberWA); setIsJoinModalOpen(false); }} className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl hover:bg-indigo-700 transition-all">GABUNG GRUP</button>
+            <button onClick={() => setIsJoinModalOpen(false)} className="w-full text-[10px] font-black text-slate-400 uppercase tracking-widest">Batal</button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Personal Cost */}
+      {personalTarget && (
+        <div className="fixed inset-0 z-[100] bg-indigo-950/60 backdrop-blur-md p-4 flex items-center justify-center animate-in fade-in">
+          <div className="bg-white w-full max-w-sm rounded-[2.5rem] p-8 space-y-5 shadow-2xl">
+            <h3 className="text-lg font-black uppercase text-indigo-900 italic">Biaya Khusus: {personalTarget.name}</h3>
+            <input value={personalDesc} onChange={e => setPersonalDesc(e.target.value)} placeholder="Contoh: Titip Kopi" className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm font-bold outline-none" />
+            <input type="number" value={personalAmount} onChange={e => setPersonalAmount(e.target.value)} placeholder="Nominal Rp" className="w-full p-4 bg-slate-50 border border-slate-100 rounded-2xl text-sm font-bold outline-none" />
+            <div className="flex gap-3 pt-2">
+              <button onClick={() => setPersonalTarget(null)} className="flex-1 py-4 text-slate-400 font-black text-[10px] uppercase">Batal</button>
+              <button onClick={addPersonalCost} className="flex-1 py-4 bg-indigo-600 text-white rounded-2xl font-black text-[10px] uppercase shadow-lg hover:bg-indigo-700 transition-all">SIMPAN</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Scanner */}
+      {isScannerOpen && (
+        <div className="fixed inset-0 z-[100] bg-slate-950/95 backdrop-blur-2xl flex flex-col animate-in fade-in">
+          <header className="p-6 text-white flex justify-between items-center border-b border-white/10">
+            <div className="flex items-center gap-3">
+               <Camera size={24} className="text-indigo-400"/>
+               <h3 className="text-xl font-black italic tracking-tighter">SCAN & ALOKASI NOTA</h3>
+            </div>
+            <button onClick={() => setIsScannerOpen(false)} className="p-2 hover:bg-white/10 rounded-xl"><X size={32}/></button>
+          </header>
+          
+          <div className="flex-1 overflow-hidden flex flex-col md:flex-row">
+            {/* Scanned Items Side */}
+            <div className="w-full md:w-1/2 p-6 md:p-10 overflow-y-auto border-r border-white/5">
+              {!scannedItems.length ? (
+                <div className="h-full flex flex-col items-center justify-center text-center space-y-8 py-20">
+                  <div className="w-32 h-32 bg-white/5 rounded-[2.5rem] flex items-center justify-center border-4 border-dashed border-white/10">
+                    {isScanning ? <Loader2 size={40} className="animate-spin text-indigo-400"/> : <Camera size={40} className="text-white/20"/>}
+                  </div>
+                  <div className="space-y-2 px-4">
+                     <h4 className="text-xl font-black text-white italic uppercase">Mulai Scan Nota</h4>
+                     <p className="text-xs text-white/40 font-bold uppercase tracking-widest">Foto nota belanja, biar sistem yang hitung otomatis</p>
+                  </div>
+                  <button onClick={() => fileInputRef.current.click()} disabled={isScanning} className="bg-white text-indigo-900 px-10 py-5 rounded-2xl font-black text-xs uppercase shadow-2xl hover:scale-105 transition-transform tracking-widest">
+                    {isScanning ? 'MENGANALSIA...' : 'PILIH FOTO NOTA'}
+                  </button>
+                  <input type="file" ref={fileInputRef} onChange={async (e) => {
+                    const file = e.target.files[0]; if(!file) return; setIsScanning(true);
+                    const reader = new FileReader(); reader.onload = async () => {
+                      const base64 = reader.result.split(',')[1];
+                      try {
+                        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                          method: 'POST', headers: {'Content-Type':'application/json'},
+                          body: JSON.stringify({ contents:[{parts:[{text:"Extract receipt items into JSON array: [{ name: string, price: number }]. Only JSON, nothing else."}, {inlineData:{mimeType:"image/png",data:base64}}]}] , generationConfig:{responseMimeType:"application/json"}})
+                        });
+                        const r = await res.json(); 
+                        setScannedItems(JSON.parse(r.candidates[0].content.parts[0].text));
+                      } catch(e) { alert("Gagal scan! Gunakan foto yang lebih terang."); } finally { setIsScanning(false); }
+                    }; reader.readAsDataURL(file);
+                  }} className="hidden" accept="image/*" />
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-6">Pilih Item Untuk Dialokasi</p>
+                  {scannedItems.map((item, idx) => (
+                    <button 
+                      key={idx} 
+                      onClick={() => setSelectedScannedIndex(idx)}
+                      className={`w-full p-6 rounded-[2rem] flex justify-between items-center transition-all border-2 text-left shadow-lg ${selectedScannedIndex === idx ? 'bg-indigo-600 border-indigo-400 text-white scale-[1.02]' : 'bg-white/5 border-white/5 text-white hover:bg-white/10'}`}
+                    >
+                      <div className="space-y-1">
+                        <p className="font-black text-sm uppercase">{item.name}</p>
+                        <p className={`text-xs font-bold ${selectedScannedIndex === idx ? 'text-indigo-200' : 'text-indigo-400'}`}>Rp {item.price.toLocaleString()}</p>
+                      </div>
+                      {selectedScannedIndex === idx ? <ChevronRight size={24}/> : <div className="w-1.5 h-1.5 bg-white/20 rounded-full"></div>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Allocation Side */}
+            <div className="w-full md:w-1/2 p-6 md:p-10 bg-black/20 overflow-y-auto">
+              {selectedScannedIndex !== null ? (
+                <div className="space-y-8 animate-in slide-in-from-right-5 duration-300">
+                  <div className="bg-white/5 p-8 rounded-[2rem] border border-white/10 text-center">
+                      <h5 className="text-2xl font-black text-white italic mb-1 uppercase">{scannedItems[selectedScannedIndex].name}</h5>
+                      <p className="text-indigo-400 font-black text-xl">Rp {scannedItems[selectedScannedIndex].price.toLocaleString()}</p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <button onClick={() => allocateScannedItem('all')} className="w-full p-6 bg-white text-indigo-900 rounded-[2rem] font-black text-xs uppercase flex items-center justify-center gap-4 hover:bg-indigo-50 transition-all shadow-xl">
+                      <Users2 size={24}/> MASUKKAN KE PATUNGAN BERSAMA
+                    </button>
+
+                    <div className="relative py-4 flex items-center justify-center">
+                       <div className="absolute w-full h-[1px] bg-white/10"></div>
+                       <span className="relative bg-transparent text-[9px] font-black text-white/20 uppercase tracking-[0.4em] px-4">ATAU TITIPAN PRIBADI</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                       {members.map(m => (
+                         <button key={m.id} onClick={() => allocateScannedItem(m.id)} className="p-5 bg-white/5 hover:bg-indigo-600/20 border border-white/5 rounded-2xl text-left transition-all">
+                            <p className="text-[8px] font-black text-white/30 uppercase mb-1">Anggota</p>
+                            <p className="text-white font-black text-sm truncate">{m.name}</p>
+                         </button>
+                       ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center text-center opacity-20">
+                   <CheckCircle2 size={64} className="text-white mb-6" />
+                   <h4 className="text-lg font-black text-white uppercase italic">Siap Dialokasi</h4>
+                   <p className="text-xs font-bold text-white mt-2">Pilih item di sisi kiri nota untuk membagi biayanya.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+
+  async function addMember(n, w) {
+    if(!n || !w || !currentEventId) return;
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/members`), { 
+      name: n, 
+      whatsapp: w, 
+      isFree: false, 
+      deposit: 0,
+      createdAt: Date.now()
+    });
+    setNewMemberName(''); setNewMemberWA('');
+  }
+
+  async function addItem() {
+    if(!newItemName || !currentEventId) return;
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/items`), { name: newItemName, assignedTo: null });
+    setNewItemName('');
+  }
+
+  async function deleteEntry(col, id) {
+    if(confirm("Hapus data ini secara permanen?")) {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/${col}`, id));
+    }
+  }
+
+  async function assignItem(itemId, memberId) {
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', `events/${currentEventId}/items`, itemId), { assignedTo: memberId });
+    setSelectedItemForMove(null);
+  }
+}
